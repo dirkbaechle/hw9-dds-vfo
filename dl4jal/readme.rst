@@ -6,6 +6,12 @@ This folder contains the original HEX-Firmware files for the
 PIC 18F452, as provided by Andreas Lindenau (DL4JAL) on his
 website `http://www.dl4jal.eu/avfo/avfo.html`.
 
+At the top-level you can find the source code for the different
+variants in PDF format (`avfo.pdf`). From this, I derived a
+plain text file (`avfo.asm`) as reference for my own
+re-programming of the 16F876 PIC as delivered for the
+UniDDS-VFO by the QRP-Project.
+
 Folder `impulse_100`
 ====================
 
@@ -77,4 +83,9 @@ var24
 
 var25
     Variant for the PIC18F4520. The modes "DIG" and "DIr" get reused for 2m, 70cm relay operation. "DIG" becomes the new "A06" with an offset of 600kHz, "DIr" becomes "A76" with an offset of 7600kHz.
+
+Folder `bandmc`
+===============
+
+HEX file for the bandswitch PIC.
 
