@@ -1,0 +1,7 @@
+env = Environment(tools=['default', 'noweb'])
+
+env.Noweave('uni-dds-hw9.ltx', 'uni-dds-hw9.nw')
+env.NoweaveHtml('dimmer.html', 'uni-dds-hw9.nw')
+env.Notangle('uni-dds-hw9.asm', 'uni-dds-hw9.nw')
+
+env.PDF('uni-dds-hw9.pdf', 'uni-dds-hw9.ltx')
