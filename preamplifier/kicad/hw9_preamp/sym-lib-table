@@ -1,0 +1,4 @@
+(sym_lib_table
+  (lib (name hw9_preamp-cache)(type Legacy)(uri ${KIPRJMOD}/hw9_preamp-cache.lib)(options "")(descr ""))
+  (lib (name hw9_preamp)(type Legacy)(uri ${KIPRJMOD}/hw9_preamp.lib)(options "")(descr ""))
+)

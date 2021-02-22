@@ -1,0 +1,9 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP BFR92
+D 0.025A Ic, 15V Vce, 5GHz Wideband NPN Transistor, SOT-323
+K RF 5GHz NPN Transistor
+F https://assets.nexperia.com/documents/data-sheet/BFR92A_N.pdf
+$ENDCMP
+#
+#End Doc Library

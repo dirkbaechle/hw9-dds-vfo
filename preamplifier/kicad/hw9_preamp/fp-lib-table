@@ -1,0 +1,3 @@
+(fp_lib_table
+  (lib (name hw9_preamp)(type KiCad)(uri ${KIPRJMOD}/hw9_preamp.pretty)(options "")(descr ""))
+)
