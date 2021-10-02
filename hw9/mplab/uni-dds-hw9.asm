@@ -51,7 +51,10 @@ LCDStr: MACRO   var1
         zwischenfrequenz:4
         frequenza:4     ;Frequenz VFO-A
         frequenzb:4     ;Frequenz VFO-B
-
+        xtal80:4        ;Frequenz 80m-XTAL (HW9-Mode)
+        
+        bconst:4        ; Band-Konstante (BandKonst - VFO = Anzeigefrequenz)
+        band:1          ; Band selektion fuer Display
         flag2:1
         flag3:1
         pointer1:1       ;Zeiger fuer indirekt
@@ -97,7 +100,7 @@ LCDStr: MACRO   var1
         ddsword:2
         ddsdword:4
         agcmerk:3       ;Zwischenspeicher fuer verzoegerte AGC
-        ubattmerk:2     ;Zwischenspeicher fuer Batteriespannung
+        bandmerk:2      ;Zwischenspeicher fuer Bandauswahl
         endc
 ;------------------------------------------------------------------------------
                         org     120h
@@ -115,7 +118,7 @@ bank3:
 #define brit            flag1,3         ;1=Rit ein
 #define bzfablage       flag1,4         ;ZF Ablage
 #define bddsohnezf      flag1,5         ;ZF Ablage beim Senden
-#define b1mhz           flag1,6         ;Merkbit Step 1Mhz
+#define bhw9            flag1,6         ;Merkbit HW9-Mode
 #define bmenu           flag1,7         ;Merkbit fuer Menu
 #define bidle           flag2,0         ;Merkbit fuer keine Funktion
 #define bpunkt          flag2,1         ;Merkbit Punkt
@@ -366,18 +369,19 @@ x0vvaus                 equ     .4
 ;=========================================================================
         org 2100h
 
-eflag1          de      0ffh
+eflag1          de      0ffh                  ; Konfig-Word (Keyer/Light/VFO-ZF/HW9-Mode)
 
-edds            de      0ffh,0ffh,0ffh,0ffh
-ezf             de      0ffh,0ffh,0ffh,0ffh
+edds            de      0ffh,0ffh,0ffh,0ffh   ; DDS-Konstante
+ezf             de      0ffh,0ffh,0ffh,0ffh   ; ZF
 evfo:
-estarta         de      0ffh,0ffh,0ffh,0ffh
-estartb         de      0ffh,0ffh,0ffh,0ffh
+estarta         de      0ffh,0ffh,0ffh,0ffh   ; Startfrequenz VFO A
+estartb         de      0ffh,0ffh,0ffh,0ffh   ; Startfrequenz VFO B
+extal80         de      0ffh,0ffh,0ffh,0ffh   ; Frequenz des 80m-XTAL (HW9-Mode)
 
-escana          de      0ffh,0ffh,0ffh,0ffh
-escanb          de      0ffh,0ffh,0ffh,0ffh
+escana          de      0ffh,0ffh,0ffh,0ffh   ; Startfrequenz für Scan
+escanb          de      0ffh,0ffh,0ffh,0ffh   ; Endfrequenz für Scan
 
-es_konst1       de      0ffh,0ffh
+es_konst1       de      0ffh,0ffh             ; S-Meter Konstanten
 es_konst2       de      0ffh,0ffh
 
 ;=========================================================================
@@ -709,7 +713,6 @@ anf1:
         BANKSEL bank1
         movlw   1
         movwf   agcmerk+2       ;Anzeigewert auf 1 setzen
-        movwf   ubattmerk+1     ;
         clrf    agcmerk         ;
         clrf    agcmerk+1       ;
         BANKSEL bank0
@@ -1013,6 +1016,11 @@ haupt:
         MOVLF   0x00,zwischenfrequenz+3
         call    subzf
         endif
+        movlw   .1              ; Aktuelles Band als Standard
+        movwf   band            ; auf 40m setzen...
+        PAGESEL PAGE3           ; DBTODO vllt. routine bandconst auf page0 verlagern?
+        call    bandconst
+        PAGESEL PAGE0
         call    dds_init        ;DDS initialisieren
         bsf     light
         call    LCDInit         ;LCD initialisieren
@@ -1028,14 +1036,6 @@ haupt0_2:
         goto    haupt0_2
         call    eeladen         ;Grunddaten aus Eeprom laden
         incf    flag1,W         ;? Urladung
-        ifdef   debug
-        movlw   4
-        movwf   step
-        movlw   1
-        movwf   impulse
-        bsf     b1mhz
-        goto    haupt1
-        endif   
         btfss   STATUS,Z
         goto    haupt0_4
         movlw   .2
@@ -1090,6 +1090,38 @@ haupt1:
         bcf     bidle           ;1 Bit fuer keine Funktion loeschen
         call    zs1setzen2sek
         movf    impulse,W       ;
+
+        btfss   bhw9            ;? Reverted tuning/IF direction
+        goto    haupt2a
+
+;
+; Auswerten des Tunings/Impulse in umgekehrte Richtung
+;
+        btfsc   impulse,7       ;  ? positive Impulse
+        goto    haupt3r
+        clrf    impulse         ;  1 wieder Vorbereiten fuer Interrupt
+        andlw   B'01111111'     ;    < 127
+        movwf   temp+9
+haupt2r:                        ;    SCHLEIFE
+        call    stepsub         ;      step subtrahieren
+        decfsz  temp+9,F        ;    ENDE Impulse=0
+        goto    haupt2r
+        goto    haupt6
+haupt3r:
+        comf    impulse,W       ;  0 komplementaer bilden
+        clrf    impulse         ;    wieder vorbereiten fuer Interrupt
+        addlw   1               ;    komplementaer -> negation
+        movwf   temp+9
+haupt4r:                        ;    SCHLEIFE
+        call    stepadd         ;      step addieren
+        decfsz  temp+9,F        ;    ENDE Impulse=0
+        goto    haupt4r
+        goto haupt6
+
+;
+; Auswerten des Tunings/Impulse in "normaler" Richtung
+;
+haupt2a:
         btfsc   impulse,7       ;  ? positive Impulse
         goto    haupt3
         clrf    impulse         ;  1 wieder Vorbereiten fuer Interrupt
@@ -1109,17 +1141,18 @@ haupt4:                         ;    SCHLEIFE
         call    stepsub         ;      step subtrahieren
         decfsz  temp+9,F        ;    ENDE Impulse=0
         goto    haupt4
+
 haupt6:
         bsf     bddsneu         ;  DDS neu berechnen
         bsf     blcdneu         ;  LCD neu anzeigen
 haupt5:
         btfss   blcdneu         ;? LCD neu anzeigen Zeile1
-        goto    haupt7
+        goto    haupt70
         bcf     bidle           ;1 Bit fuer keine Funktion loeschen
         call    LCDAnzeigeZ1    ;  LCD neu anzeigen Zeile1
         call    LCDAnzeigeZ2    ;  LCD neu anzeigen Zeile2
         bcf     blcdneu         ;  BIT loeschen LCD neuanzeige
-haupt7:
+haupt70:
         btfss   bddsneu         ;? DDS neu berechnen
         goto    haupt8
         bcf     bidle           ;1 Bit fuer keine Funktion loeschen
@@ -1146,14 +1179,6 @@ haupt8:                         ;
         goto    haupt8_1        ;  1 Taste kurz gedrueckt
 haupt0001:
         incf    step,F          ;    Abstimmschritte aendern
-        btfss   b1mhz           ;
-        goto    haupt8_4        ;
-        movf    step,W          ;    ? grobsten Schritt erreicht
-        xorlw   5               ;
-        SKPZ                    ;
-        goto    haupt8_2        ;
-        goto    haupt8_5        ;
-haupt8_4:                       ;
         movf    step,W          ;    ? grobsten Schritt erreicht
         xorlw   .4              ;
         SKPZ                    ;
@@ -1256,7 +1281,7 @@ haupt13:
         SKPZ
         goto    haupt801        ;
         PAGESEL PAGE2
-        call    AnzeigeBatt     ;  1 Batteriespannung anzeigen
+        call    AnzeigeBand     ;  1 Bandauswahl anzeigen
         PAGESEL PAGE0
 haupt801:
         movf    idlecounter,W   ;
@@ -1319,9 +1344,6 @@ haupt99:
 ;Eingang        Frequenz im Speicher
 ;Ausgang        LCD
 
-FunktionPos:    equ     .11
-ubattpos:       equ     4ch
-
 LCDAnzeigeZ2:
         btfss   bkeyer
         goto    LCDAnZ202
@@ -1345,7 +1367,6 @@ LCDAnZ202:
         movlw   'x'             ;1 Zeile 2 RX Frequenz
         goto    LCDAnZ201       ;
 LCDAnZ203:
-
         movlw   'A'             ;
         btfss   bvfo            ;? VFO B aktiv
         movlw   'B'             ;1 B anzeigen
@@ -1356,11 +1377,9 @@ LCDAnZ203:
         movlw   'b'             ;  1 B anzeigen
 LCDAnZ201:
         call    LCDChar         ;anzeigen
-        movlw   frequenza+3     ;
-        btfss   bvfo            ;? Frequenz B
-        movlw   frequenzb+3     ;1 VFO B in Indexregister laden
-        goto    LCDAnzeige
-
+        btfss   bvfo            ;? Frequenz B an
+        goto    LCDLoadB
+        goto    LCDLoadA
 LCDAnzeigeZ1:
         clrw                    ;1. Position Zeile 1
         call    LCDPos          ;Cursor bewegen
@@ -1370,8 +1389,6 @@ LCDAnzeigeZ1:
         movlw   'r'             ;
         goto    LCDAnZ101       ;
 LCDAnZ102:
-
-
         movlw   'A'             ;
         btfsc   bvfo            ;? VFO B aktiv
         movlw   'B'             ;1 B anzeigen
@@ -1382,10 +1399,28 @@ LCDAnZ102:
         movlw   'b'             ;1 B anzeigen
 LCDAnZ101:
         call    LCDChar         ;anzeigen
-        movlw   frequenza+3     ;
-        btfsc   bvfo            ;? Frequenz B
-        movlw   frequenzb+3     ;1 VFO B in Indexregister laden
+        btfsc   bvfo            ;? Frequenz B aus
+        goto    LCDLoadB
+        goto    LCDLoadA
+LCDLoadB:
+        LD4     tempkonst1, frequenzb   ;1 VFO B temporär kopieren
+        goto LCDfkorr
+LCDLoadA:
+        LD4     tempkonst1, frequenza   ;1 VFO A temporär kopieren
+LCDfkorr:
+        btfss   bhw9
+        goto    LCDAnzeige
+
+        movlw   tempkonst1              ; Von bisheriger Frequenz
+        movwf   pointer1                ; die Bandkonstante abziehen
+        movlw   bconst                  ; und das Ergebnis
+        movwf   pointer2                ; wieder speichern...
+        PAGESEL PAGE0
+        call    cleartemp4
+        call    bcdsub4
+        PAGESEL PAGE2
 LCDAnzeige:
+        movlw   tempkonst1+3
         movwf   FSR
         bsf     bnull           ;BIT fuehrende Null setzen
         swapf   INDF,W
@@ -1450,7 +1485,7 @@ LCDAnz9:                        ;kein Leerzeichen ausgeben
 ;Funktion       eine Zahl auf LCD ausgeben Fuehrende 0 als Leerzeichen
 
 LCDfrqbyte:
-        andlw   B'00001111'     ;unteres Nibbel filetern
+        andlw   B'00001111'     ;unteres Nibbel filtern
         btfss   STATUS,Z        ;? Zeichen = 0
         goto    LCDfrq3
         btfss   bnull           ;1 ? fuehrende Null
@@ -1464,6 +1499,25 @@ LCDfrq3:
 LCDfrq4
         goto    LCDChar
 
+;=========================================================================
+band2hex:
+        andlw   B'00000111'     ;sicherheitshalber nur bits 0-3
+        addwf   PCL             ;zum Programmcounter addieren
+        retlw   .128            ; 0 -> 0x80
+        retlw   .48             ; 1 -> 0x40
+        retlw   .36             ; 2 -> 0x30
+        retlw   .32             ; 3 -> 0x20
+        retlw   .23             ; 4 -> 0x17
+        retlw   .21             ; 5 -> 0x15
+        retlw   .18             ; 6 -> 0x12
+        retlw   .16             ; 7 -> 0x10
+
+LCDBand:
+        movf    band,W
+        call    band2hex
+        call    LCDHEX
+        LCDStr  tbm             ;"m" im Display hinzufuegen
+
 ;==============================================================================
 ;Abfragen Tastenstatus mit Entprellung
 ;Ausgang        Nummer der Taste in tastennummer
@@ -1471,7 +1525,7 @@ LCDfrq4
 
 tastcounter     equ     .10     ;Anzahl der Eingabesequenzen die geprueft werden
                                 ;auf Gleichheit
-
+; DBTODO erweitern auf zusaetzliche Tasten
 tastaturstatus:
         movlw   tastcounter
         movwf   schleife        ;zwischenspeichern
@@ -2266,7 +2320,7 @@ eread:
         return
 ;=========================================================================
 eeladen:
-        movlw   .17
+        movlw   .21
         movwf   schleife
         movlw   flag1
         movwf   FSR
@@ -2384,8 +2438,8 @@ u2pwr:
         retlw   99h     ;3f
 
 ;------------------------------------------------------------------------------
-textc2:         DT      40h,"V1.10 init",0
-textc4:         DT      40h,"V1.10   30.09.14",0
+textc2:         DT      40h,"V2.1 init",0
+textc4:         DT      40h,"V2.1   27.09.21",0
 
 textc1:         DT      0,  "DL-QRP-AG UniDDS",0
 textc3:         DT      0,  "DDS-VFO(c)DL4JAL",0
@@ -2415,15 +2469,16 @@ textoff:        DT      40H,"   off          ",0
 
 tbreak:         DT      0,  " 0 break        ",0
 tvfoab:         DT      0,  " 1 VFO A/B      ",0
-tlight:         DT      0,  " 2 light on/off ",0
-tlightauto:     DT      0,  " 3 light auto   ",0
-tscan:          DT      0,  " 4 scan         ",0
-tsetup:         DT      0,  " 5 SETUP        ",0
-tkeyer:         DT      0,  " 6 keyer        ",0
-ttune:          DT      0,  " 7 tune         ",0
-txit1k:         DT      0,  " 8 xit 1k       ",0
-txit2k:         DT      0,  " 9 xit 2k       ",0
-trit:           DT      0,  "10 rit          ",0
+tband:          DT      0,  " 2 Band         ",0
+tlight:         DT      0,  " 3 light on/off ",0
+tlightauto:     DT      0,  " 4 light auto   ",0
+tscan:          DT      0,  " 5 scan         ",0
+tsetup:         DT      0,  " 6 SETUP        ",0
+tkeyer:         DT      0,  " 7 keyer        ",0
+ttune:          DT      0,  " 8 tune         ",0
+txit1k:         DT      0,  " 9 xit 1k       ",0
+txit2k:         DT      0,  "10 xit 2k       ",0
+trit:           DT      0,  "11 rit          ",0
 
 stbreak:        DT      0,  " 0 Setup break  ",0
 stddskonst:     DT      0,  " 1 DDS-Takt     ",0
@@ -2435,8 +2490,19 @@ stscanend       DT      0,  " 6 scan-end     ",0
 stsmeter        DT      0,  " 7 S-Meter eich.",0
 stvfozf         DT      0,  " 8 VFO +/- ZF   ",0
 sttxzf          DT      0,  " 9 TX +/- ZF    ",0
-st1mhz          DT      0,  "10 100kHz step  ",0
+sthw9           DT      0,  "10 HW9-Mode     ",0
 stdefault       DT      0,  "11 def. config  ",0
+
+tbbreak:        DT      0,  " 0 Band break   ",0
+tb80m:          DT      0,  " 1 80m          ",0
+tb40m:          DT      0,  " 2 40m          ",0
+tb30m:          DT      0,  " 3 30m          ",0
+tb20m:          DT      0,  " 4 20m          ",0
+tb17m:          DT      0,  " 5 17m          ",0
+tb15m:          DT      0,  " 6 15m          ",0
+tb12m:          DT      0,  " 7 12m          ",0
+tb10m:          DT      0,  " 8 10m          ",0
+tbm:            DT      0  ,"m",0
 
 ;==============================================================================
 
@@ -2463,7 +2529,7 @@ smenuanzeige:
         goto    smtsmeter
         goto    smtvfozf
         goto    smttxzf 
-        goto    smt1mhz 
+        goto    smthw9  
         goto    smtdefault
         goto    mtbreak
         goto    mtbreak
@@ -2475,6 +2541,7 @@ menuanzeige:
         addwf   PCL
         goto    mtbreak
         goto    mtvfoab
+        goto    mtband
         goto    mtlight
         goto    mtlightauto
         goto    mtscan
@@ -2491,6 +2558,26 @@ menuanzeige:
         goto    mtbreak
         goto    mtbreak
 ;------------------------------------------------------------------------------
+bmenuanzeige:
+        andlw   B'00001111'
+        addwf   PCL
+        goto    tbbreak
+        goto    tb80m
+        goto    tb40m
+        goto    tb30m
+        goto    tb20m
+        goto    tb17m
+        goto    tb15m
+        goto    tb12m
+        goto    tb10m
+        goto    tbbreak 
+        goto    tbbreak 
+        goto    tbbreak
+        goto    tbbreak
+        goto    tbbreak
+        goto    tbbreak
+        goto    tbbreak
+;------------------------------------------------------------------------------
 smenuausfuehren:
         andlw   B'00001111'
         addwf   PCL
@@ -2504,7 +2591,7 @@ smenuausfuehren:
         goto    smsmeter
         goto    smvfozf
         goto    smtxzf
-        goto    sm1mhz
+        goto    smhw9
         goto    smdefault_1
         goto    mbreak
         goto    mbreak
@@ -2516,6 +2603,7 @@ menuausfuehren:
         addwf   PCL
         goto    mbreak
         goto    mvfoab
+        goto    mrband
         goto    mlight
         goto    mlightauto
         goto    mscan
@@ -2558,7 +2646,7 @@ smsmeter:
 P2smsmeter:
         goto    smbreak
 ;--------------------------------
-maxebene        equ     .10     ;
+maxebene        equ     .11     ;
 ;::::::::::::::::::::::::::::::::
 Menuauswertung:                 ;
         clrf    impulse         ;impulse = 0
@@ -2635,7 +2723,6 @@ mausw03:                        ;SCHLEIFE(3)
 mausw11:                        ;
         BANKSEL bank1           ;
         movlw   0ffh            ;
-        movwf   ubattmerk+1     ;neuanzeige batt simulieren
         movwf   agcmerk+2       ;neuanzeige agc simulieren
         BANKSEL bank0           ;
         return                  ;
@@ -2656,7 +2743,6 @@ mbreak:
         bsf     bddsneu         ;DDS neu ansteuern
         BANKSEL bank1
         movlw   0ffh
-        movwf   ubattmerk+1     ;neuanzeige batt simulieren
         movwf   agcmerk+2       ;neuanzeige agc simulieren
         BANKSEL bank0
         return
@@ -2703,6 +2789,13 @@ mkeyer1:
         bsf     bkeyer
 mkeyer2
         goto    mflagsp
+;------------------------------------------------------------------------------
+; Redirektion fuer Band-Menue auf Page 3
+mrband:
+        PAGESEL PAGE3
+        call    mband
+        PAGESEL PAGE2
+        goto    mbreak
 ;------------------------------------------------------------------------------
 mlight:
         btfsc   blight
@@ -2815,13 +2908,13 @@ smtxzf01:
         bsf     bddsohnezf
         goto    mflagsp
 ;------------------------------------------------------------------------------
-sm1mhz:
-        btfss   b1mhz
-        goto    sm1mhz01
-        bcf     b1mhz
+smhw9:
+        btfss   bhw9
+        goto    smhw901
+        bcf     bhw9
         goto    mflagsp
-sm1mhz01:
-        bsf     b1mhz
+smhw901:
+        bsf     bhw9
         goto    mflagsp
 ;------------------------------------------------------------------------------
 smvfozf:
@@ -3205,17 +3298,17 @@ smttxzf01:
         LCDStr  texton
         PAGESEL PAGE2
         return
-smt1mhz:
+smthw9:
         PAGESEL PAGE0
-        LCDStr  st1mhz
+        LCDStr  sthw9
         PAGESEL PAGE2
-        btfss   b1mhz
-        goto    smt1mhz01
+        btfss   bhw9
+        goto    smthw901
         PAGESEL PAGE0
         LCDStr  textoff
         PAGESEL PAGE2
         return
-smt1mhz01:
+smthw901:
         PAGESEL PAGE0
         LCDStr  texton
         PAGESEL PAGE2
@@ -3282,6 +3375,13 @@ mtrit2:
         LCDStr  trit
         PAGESEL PAGE2
         return
+
+mtband:
+        PAGESEL PAGE0
+        LCDStr  tband
+        PAGESEL PAGE2
+        return
+
 mtvfoab:
         PAGESEL PAGE0
         LCDStr  tvfoab
@@ -3397,14 +3497,12 @@ AAGC03:
         return
 
 ;==============================================================================
-AnzeigeBatt:
-        PAGESEL PAGE0           ;
-        call    UBatt           ;Batteriespannung messen
-        call    ubatt_mul       ;umrechnen
-        PAGESEL PAGE2           ;
-        BANKSEL bank1           ;
-        movwf   ubattmerk       ;
-        subwf   ubattmerk+1,W   ;? alter wert != neuer wert
+AnzeigeBand:
+        BANKSEL bank0           ;
+        movf    band,W
+        BANKSEL bank1
+        movwf   bandmerk        ;
+        subwf   bandmerk+1,W    ;? alter wert != neuer wert
         BANKSEL bank0           ;
         SKPNZ                   ;
         goto    az03            ;0 --> break zum ende
@@ -3412,39 +3510,11 @@ AnzeigeBatt:
         movlw   .11             ;  pos in LCD
         call    LCDPos          ;
         BANKSEL bank1           ;
-        movf    ubattmerk,W     ;  neuen wert merken
-        movwf   ubattmerk+1     ;
+        movf    bandmerk,W      ;  neuen wert merken
+        movwf   bandmerk+1      ;
         BANKSEL bank0           ;
-        call    HEX2BCD         ;  in BCD wandeln
-        PAGESEL PAGE2           ;
-        movf    temp+7,W        ;
-        andlw   0fh             ;  ? erste stelle 0
-        SKPZ                    ;
-        goto    az01            ;
         PAGESEL PAGE0           ;  1 Leerzeichen anstelle 0
-        call    LCDSpace        ;
-        PAGESEL PAGE2           ;
-        goto    az02            ;
-az01:                           ;
-        movf    temp+7,W        ;  0 wert anzeigen
-        PAGESEL PAGE0           ;
-        call    BCDToASCII      ;
-        call    LCDChar         ;
-        PAGESEL PAGE2           ;
-az02:                           ;       
-        PAGESEL PAGE0           ;
-        movf    temp+6,W        ;  naechste stelle
-        movwf   LCDByte2        ;
-        swapf   LCDByte2,W      ;
-        call    BCDToASCII      ;
-        call    LCDChar         ;
-        movlw   '.'             ;  Komma
-        call    LCDChar         ;
-        movf    LCDByte2,W      ;  naechste stelle
-        call    BCDToASCII      ;
-        call    LCDChar         ;
-        movlw   'V'             ;  "V"
-        call    LCDChar         ;
+        call    LCDBand         ;
         PAGESEL PAGE2           ;
 az03:
         return                  ;fertig
@@ -3673,7 +3743,13 @@ mscan:
 scan01:
         PAGESEL PAGE0           ;SCHLEIFE(1)
         call    LCDAnzeigeZ1    ;  LCD neu anzeigen Zeile1
+        btfss   bhw9            ; Im HW9-Mode subtrahieren, anstatt
+        goto    scan01add       ; die steps zu addieren...
+        call    stepsub         ;  step abziehen
+        goto    scan01stp
+scan01add
         call    stepadd         ;  step addieren
+scan01stp:
         call    ddsbinausrechnen;  DDS neu ausrechnen
         call    t1mSek          ;
         call    rx_to_dds       ;  Empfangsfrequenz laden
@@ -3826,6 +3902,7 @@ msausw03:
         call    smenuausfuehren
         goto    msetup
         
+
 ;==============================================================================
 ;Funktion       HEX zu BCD wandeln
 
@@ -4066,6 +4143,7 @@ nr2vfoH:
         retlw   HIGH vfo5
         retlw   HIGH vfo6
         retlw   HIGH vfo7
+        retlw   HIGH vfohw9
 ;------------------------------------------------------------------------------
 nr2vfoL:
         addwf   PCL             ;zum Programmcounter addieren
@@ -4077,84 +4155,102 @@ nr2vfoL:
         retlw   LOW vfo5
         retlw   LOW vfo6
         retlw   LOW vfo7
+        retlw   LOW vfohw9
 ;------------------------------------------------------------------------------
 nr2ddsL:
         addwf   PCL             ;zum Programmcounter addieren
         retlw   LOW dds0
         retlw   LOW dds1
-        retlw   LOW dds2
-        retlw   LOW dds2
 ;------------------------------------------------------------------------------
 nr2ddsH:
         addwf   PCL             ;zum Programmcounter addieren
         retlw   HIGH dds0
         retlw   HIGH dds1
-        retlw   HIGH dds2
-        retlw   HIGH dds2
 ;------------------------------------------------------------------------------
 nr2zfH:
         addwf   PCL             ;zum Programmcounter addieren
         retlw   HIGH zf0
         retlw   HIGH zf1
+        retlw   HIGH zf2
+        retlw   HIGH zf2
 ;------------------------------------------------------------------------------
 nr2zfL:
         addwf   PCL             ;zum Programmcounter addieren
         retlw   LOW zf0
         retlw   LOW zf1
+        retlw   LOW zf2
+        retlw   LOW zf2
 ;------------------------------------------------------------------------------
 konst           de      .3,0                    ;S_Meter konstande 1
                 de      .80,0                   ;S_meter konstande 2
 ;------------------------------------------------------------------------------
-vfo0:           de      0,0,81h,01h             ;Startfrequenz
-                de      0,0,81h,01h             ;Startfrequenz
-                de      0,0,81h,01h             ;Startfrequenz fuer scan
-                de      0,50h,84h,01h           ;Endfrequenz fuer scan
+; Starts at address 0x3050
 ;------------------------------------------------------------------------------
-vfo1:           de      0,0,56h,03h             ;Startfrequenz
-                de      0,0,56h,03h             ;Startfrequenz
-                de      0,0,50h,03h             ;Startfrequenz fuer scan
-                de      0,0,57h,03h             ;Endfrequenz fuer scan
+vfo0:           de      0x00,0x00,0x81,0x01     ;Startfrequenz
+                de      0x00,0x00,0x81,0x01     ;Startfrequenz
+                de      0x00,0x00,0x81,0x01     ;Startfrequenz fuer scan
+                de      0x00,0x50,0x84,0x01     ;Endfrequenz fuer scan
 ;------------------------------------------------------------------------------
-vfo2:           de      0,0,03h,07h             ;Startfrequenz
-                de      0,0,03h,07h             ;Startfrequenz
-                de      0,0,0,07h               ;Startfrequenz fuer scan
-                de      0,50h,03h,07h           ;Endfrequenz fuer scan
+vfo1:           de      0x00,0x00,0x56,0x03     ;Startfrequenz
+                de      0x00,0x00,0x56,0x03     ;Startfrequenz
+                de      0x00,0x00,0x50,0x03     ;Startfrequenz fuer scan
+                de      0x00,0x00,0x57,0x03     ;Endfrequenz fuer scan
 ;------------------------------------------------------------------------------
-vfo3:           de      0,60h,11h,10h           ;Startfrequenz
-                de      0,60h,11h,10h           ;Startfrequenz
-                de      0,0,10,10h              ;Startfrequenz fuer scan
-                de      0,50h,12h,11h           ;Endfrequenz fuer scan
+vfo2:           de      0x00,0x00,0x03,0x07     ;Startfrequenz
+                de      0x00,0x00,0x03,0x07     ;Startfrequenz
+                de      0x00,0x00,0x00,0x07     ;Startfrequenz fuer scan
+                de      0x00,0x50,0x03,0x07     ;Endfrequenz fuer scan
 ;------------------------------------------------------------------------------
-vfo4:           de      0,0,06h,14h             ;Startfrequenz
-                de      0,0,06h,14h             ;Startfrequenz
-                de      0,0,0,14h               ;Startfrequenz fuer scan
-                de      0,50h,06h,14h           ;Endfrequenz fuer scan
+vfo3:           de      0x00,0x60,0x11,0x10     ;Startfrequenz
+                de      0x00,0x60,0x11,0x10     ;Startfrequenz
+                de      0x00,0x00,0x0a,0x10     ;Startfrequenz fuer scan
+                de      0x00,0x50,0x12,0x11     ;Endfrequenz fuer scan
 ;------------------------------------------------------------------------------
-vfo5:           de      0,60h,09h,18h           ;Startfrequenz
-                de      0,60h,09h,18h           ;Startfrequenz
-                de      0,80h,06h,18h           ;Startfrequenz fuer scan
-                de      0,0,13h,18h             ;Endfrequenz fuer scan
+vfo4:           de      0x00,0x00,0x06,0x14     ;Startfrequenz
+                de      0x00,0x00,0x06,0x14     ;Startfrequenz
+                de      0x00,0x00,0x00,0x14     ;Startfrequenz fuer scan
+                de      0x00,0x50,0x06,0x14     ;Endfrequenz fuer scan
 ;------------------------------------------------------------------------------
-vfo6:           de      0,0,06h,21h             ;Startfrequenz
-                de      0,0,06h,21h             ;Startfrequenz
-                de      0,0,0,21h               ;Startfrequenz fuer scan
-                de      0,50h,06h,21h           ;Endfrequenz fuer scan
+vfo5:           de      0x00,0x60,0x09,0x18     ;Startfrequenz
+                de      0x00,0x60,0x09,0x18     ;Startfrequenz
+                de      0x00,0x80,0x06,0x18     ;Startfrequenz fuer scan
+                de      0x00,0x00,0x13,0x18     ;Endfrequenz fuer scan
 ;------------------------------------------------------------------------------
-vfo7:           de      0,0,06h,28h             ;Startfrequenz
-                de      0,0,06h,28h             ;Startfrequenz
-                de      0,0,0,28h               ;Startfrequenz fuer scan
-                de      0,50h,06h,28h           ;Endfrequenz fuer scan
+vfo6:           de      0x00,0x00,0x06,0x21     ;Startfrequenz
+                de      0x00,0x00,0x06,0x21     ;Startfrequenz
+                de      0x00,0x00,0x00,0x21     ;Startfrequenz fuer scan
+                de      0x00,0x50,0x06,0x21     ;Endfrequenz fuer scan
 ;------------------------------------------------------------------------------
-zf0:            de      18h,05h,3dh,0           ;ZF binaer 3,999 Mhz
+vfo7:           de      0x00,0x00,0x06,0x28     ;Startfrequenz
+                de      0x00,0x00,0x06,0x28     ;Startfrequenz
+                de      0x00,0x00,0x00,0x28     ;Startfrequenz fuer scan
+                de      0x00,0x50,0x06,0x28     ;Endfrequenz fuer scan
 ;------------------------------------------------------------------------------
-zf1:            de      44h,0fdh,4ah,0          ;ZF binaer 4,9145 Mhz
+vfohw9:         de      0xc4,0x8a,0x5b,0x00     ;Startfrequenz            5.9993MHz 0x005B8AC4
+                de      0xc4,0x8a,0x5b,0x00     ;Startfrequenz            5.9993MHz 0x005B8AC4
+                de      0xc4,0x8a,0x5b,0x00     ;Startfrequenz fuer scan  5.9993MHz 0x005B8AC4
+                de      0x34,0xba,0x57,0x00     ;Endfrequenz fuer scan    5.7493MHz 0x0057BA34
 ;------------------------------------------------------------------------------
-dds0:           de      0b8h,063h,05eh,05h      ;DDS konstande 50Mhz
+zf0:            de      0x18,0x05,0x3d,0x00     ;ZF binaer 3,999 Mhz
 ;------------------------------------------------------------------------------
-dds1:           de      0c0h,04fh,02fh,0bh      ;DDS konstande 24Mhz
+zf1:            de      0xec,0xbe,0x86,0x00     ;ZF binaer 8,8307 Mhz
 ;------------------------------------------------------------------------------
-dds2:           de      071h,0c7h,0bch,0ah      ;DDS konstande 25Mhz
+zf2:            de      0x44,0xfd,0x4a,0x00     ;ZF binaer 4,9145 Mhz
 ;------------------------------------------------------------------------------
+dds0:           de      0xb8,0x63,0x5e,0x05     ;DDS konstande 50Mhz
+;------------------------------------------------------------------------------
+dds1:           de      0xc0,0x4f,0x2f,0x0b     ;DDS konstande 24Mhz
+;------------------------------------------------------------------------------
+xtal80m:        de      0x90,0xb1,0x17,0x01     ; xtal 80m = 18.33MHz 0x0117B190
+;------------------------------------------------------------------------------
+xtald:          de      0x00,0x00,0x00,0x00     ; Diff QuarzFreq 80m -> 80m = 0MHz
+                de      0xe0,0x67,0x35,0x00     ; " -> 40m =  3.50MHz 0x003567E0
+                de      0xa0,0x2e,0x63,0x00     ; " -> 30m =  6.50MHz 0x00632EA0
+                de      0xa0,0x37,0xa0,0x00     ; " -> 20m = 10.50MHz 0x00A037A0
+                de      0xa0,0x40,0xdd,0x00     ; " -> 17m = 14.50MHz 0x00DD40A0
+                de      0x60,0x07,0x0b,0x01     ; " -> 15m = 17.50MHz 0x010B0760
+                de      0xd0,0x3f,0x44,0x01     ; " -> 12m = 21.25MHz 0x01443FD0
+                de      0x20,0xd7,0x75,0x01     ; " -> 10m = 24.50MHz 0x0175D720
 
 ;Auswertung der Urladung
 ;------------------------------
@@ -4175,18 +4271,26 @@ dds2:           de      071h,0c7h,0bch,0ah      ;DDS konstande 25Mhz
 ;------------------------------
 ;0      = DDS-Takt 50MHz
 ;32     = DDS-Takt 24MHz
-;64     = DDS-Takt 25MHz
 ;------------------------------
 ;0      = ZF 3,999 MHz
+;64     = ZF 8,8307 MHz -> switch to HW9 mode
 ;128    = ZF 4,9145 MHz
 ;------------------------------
 
 smdefault:
         LD2     temp+8,temp+1   ;2 Kopien da temp+1 gebraucht wird
         LD2     temp+6,temp+1   ;2 Byte kopieren fuer die Zukunft
+; Auswertung VFO-Frequenzen
         movf    temp+6,W        ;low byte holen
+        btfsc   W,6             ;IF = 8.8307? (HW9-Mode?)
+        goto    smsethw9
         andlw   b'00000111'     ;bit 0-2 auswerten
         movwf   temp+6          ;merken
+        goto    smsetvfo
+smsethw9:
+        movlw   .8              ; VFOs für HW9 direkt anwählen (idx=8) 
+        movwf   temp+6          ;merken
+smsetvfo:
         call    nr2vfoL         ;lowteil der ROM-Adresse
         movwf   temp+1          
         movf    temp+6,W        ;highteil der ROM-Adresse
@@ -4197,13 +4301,14 @@ smdefault:
         movlw   evfo            ;Eepromadresse
         movwf   temp+3
         call    rom2eeprom      ;und umspeichern
+; Auswertung DDS-Konstante
         LD1     temp+6,temp+8   ;byte neu holen
-        rrf     temp+6,F        ;bit 5 und 6 in
+        rrf     temp+6,F        ;bit 5 in
         rrf     temp+6,F        ;richtung bit 0
         rrf     temp+6,F        ;schieben
         rrf     temp+6,F
         rrf     temp+6,W
-        andlw   b'00000011'     ;bit 0 und 1 auswerten
+        andlw   b'00000001'     ;bit 0 auswerten
         movwf   temp+6          ;byte merken
         call    nr2ddsL         ;low adresse im rom
         movwf   temp+1
@@ -4215,10 +4320,12 @@ smdefault:
         movlw   edds            ;DDSkonstande Adresse im Eeprom
         movwf   temp+3
         call    rom2eeprom      ;und umspeichern
-        LD1     temp+6,temp+8
-        rlf     temp+6,F        ;bit 7 nach links zum bit 0
-        rlf     temp+6,W        ;schieben
-        andlw   b'00000001'     ;bit 0 selektieren
+; Auswertung ZF
+        LD1     temp+6,temp+8   ; byte neu holen
+        rlf     temp+6,F        ;bit 7 und 6 nach links zum bit 0
+        rlf     temp+6,F        ;schieben
+        rlf     temp+6,W        ;
+        andlw   b'00000011'     ;bit 0 und 1 selektieren
         movwf   temp+6          ;byte merken
         call    nr2zfL          ;lowadresse im Rom
         movwf   temp+1
@@ -4230,12 +4337,15 @@ smdefault:
         movlw   ezf             ;ZF-Adresse im Eeprom
         movwf   temp+3
         call    rom2eeprom      ;und umspeichern
+; Auswertung Keyer/Light/ZF-VFO/HW9-Mode
         movlw   b'00000011'     ;Flags fuer Keyer und lightauto 
         movwf   temp            ;Flagbyte vorbereiten
         btfsc   temp+8,3        ;? ZF-Ablage
         bsf     temp,4          ;1 VFO+ZF
         btfsc   temp+8,4        ;? TX direkt    
         bsf     temp,5          ;1 TX ohne ZF-Ablage
+        btfsc   temp+8,6        ;? IF=8.8307 -> HW9-Mode        
+        bsf     temp,6          ;1 TX ohne ZF-Ablage
         movwf   data_ee_data    ;Byte Vorbereiten zum speichern
         clrf    data_ee_addr    ;Adresse 0 im Eeprom
         PAGESEL PAGE0
@@ -4433,9 +4543,162 @@ smsm04:                         ;
 ;------------------------------------------------------------------------------
 
 ;==============================================================================
+mband:
+
+bmaxebene       equ     .8
+
+        movf    band,W            ; Initial das aktuelle Band setzen
+        incf    W,0
+        movwf   ebene
+        clrf    impulse           ; Impulse zuruecksetzen
+        PAGESEL PAGE0
+        call    LCDDisplayClear
+        PAGESEL PAGE3
+mbausw01:
+        PAGESEL PAGE0
+        call    tastaturstatus
+        PAGESEL PAGE3
+        SKPNC
+        goto    mbausw01
+        movf    ebene,W
+        PAGESEL PAGE2
+        call    bmenuanzeige
+        PAGESEL PAGE3
+mbausw02:
+        movf    impulse,W       ;? Impulse angefallen
+        SKPNZ
+        goto    mbausw04
+        PAGESEL PAGE0
+        call    zs1setzen2sek
+        PAGESEL PAGE3
+        btfsc   impulse,7       ;1 ? Vorwaertz
+        goto    mbausw05
+        incf    ebene,F         ;  1
+        movf    ebene,W
+        xorlw   bmaxebene+1     ;
+        SKPNZ
+        clrf    ebene
+        goto    mbausw06
+mbausw05:
+        decf    ebene,F
+        movf    ebene,W
+        xorlw   0ffh
+        SKPZ
+        goto    mbausw06
+        movlw   bmaxebene
+        movwf   ebene
+mbausw06:
+        PAGESEL PAGE0
+        call    LCDDisplayClear
+        PAGESEL PAGE3
+        movf    ebene,W
+        PAGESEL PAGE2
+        call    bmenuanzeige
+        PAGESEL PAGE3
+        clrf    impulse
+mbausw04:
+        PAGESEL PAGE0
+        call    tastaturstatus
+        PAGESEL PAGE3
+        SKPC
+        goto    mbausw02
+mbausw03:
+        PAGESEL PAGE0
+        call    tastaturstatus
+        PAGESEL PAGE3
+        SKPNC
+        goto    mbausw03
+        movf    ebene,W
+        addlw   0x00           ; wenn ebene == 0 stoppe submenu
+        btfss   STATUS,Z
+        goto    mbstore
+        return
+mbstore:
+        decf    W,0            ; ebene - 1 als neue bandauswahl speichern
+        movwf   band
+        call    bandconst
+        goto    mband
+        
+
+bandconst:
+        movlw   .4              ; 4 Bytes lesen
+        movwf   temp
+        movlw   low(xtald)      ;lowteil der ROM-Adresse merken
+        movwf   temp+1          
+        movlw   high(xtald)     ;highteil der ROM-Adresse merken
+        movwf   temp+2          ;
+
+        movf    band,W          ; Aktuelle Band-Selektion
+        movwf   temp+3          ; mit 4 multiplizieren
+        rlf     temp+3,f        ; und die LOW-Adresse
+        rlf     temp+3,f        ; entsprechend erhöhen.
+        rlf     temp+3,f        ; Warnung: Aktuelle Annahme dass
+        movf    temp+3,W        ; es zu keinem WrapAround der
+        addwf   temp+1,f        ; LOW-Adresse kommt! Ggf. in HEX-File überpruefen!!!
+
+        movlw   bconst          ; Indir. Adressierung auf bconst
+        movwf   FSR             ; als Start-Adresse für Ziel setzen
+rom2temp:
+        movf    temp+1,W                ; Low+High Adresse im ROM setzen
+        BANKSEL EEADR
+        movwf   EEADR                   ;in Register laden
+        BANKSEL bank0   
+        movf    temp+2,W
+        BANKSEL EEADRH
+        movwf   EEADRH                  ;in Register laden
+romnext1:
+        BANKSEL EECON1                  ;SCHLEIFE(1)
+        bsf     EECON1, EEPGD           ;  lesen aus dem Programmspeicher
+        bcf     INTCON,GIE              ;  Interrupt sperren
+        btfsc   INTCON,GIE              ;  warten bis gesperrt
+        goto    romnext1
+        bsf     EECON1, RD              ;  lesen im Rom
+        nop
+        nop
+        bsf     INTCON,GIE              ;  Interrupt wieder freigeben
+        BANKSEL EEDATA
+        movf    EEDATA, W               ;  daten in W
+        BANKSEL bank0
+        movwf   INDF                    ; Byte in Indir. Ziel speichern
+        incf    FSR, f                  ; Ziel-Adresse weiterzaehlen
+        incfsz  temp+1,F                ;  naechste Adresse im Rom LOW
+        goto    romnext2
+        BANKSEL EEADRH                  ;  LOW Ueberlauf HIGH Addr + 1
+        incf    EEADRH,F                ;
+        BANKSEL bank0                   ;
+romnext2:
+        movf    temp+1,W                ;
+        BANKSEL EEADR                   ;
+        movwf   EEADR                   ;
+        BANKSEL bank0                   ;
+        decfsz  temp,F                  ;ENDE(1) 
+        goto    romnext1                ;
+        clrf    FSR                     ; Indir. Adressierung zuruecksetzen
+
+        
+        movlw   bconst                  ; Zu Banddiff (aus ROM) die Frequenz
+        movwf   pointer1                ; des 80m-XTALs addieren
+        movlw   xtal80                  ; und das Ergebnis
+        movwf   pointer2                ; wieder in bconst speichern...
+        PAGESEL PAGE0
+        call    cleartemp4
+        call    bcdadd4
+        PAGESEL PAGE2
+
+        movlw   bconst                  ; Von bisheriger Konstante
+        movwf   pointer1                ; die IF abziehen
+        movlw   zwischenfrequenz        ; und das Ergebnis
+        movwf   pointer2                ; wieder in bconst speichern...
+        PAGESEL PAGE0
+        call    cleartemp4
+        call    bcdsub4
+        PAGESEL PAGE2
+
+        return
+        
+;==============================================================================
         nop
         nop
         END
-
 
 
